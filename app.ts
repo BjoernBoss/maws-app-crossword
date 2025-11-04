@@ -169,6 +169,13 @@ class ActiveGame {
 			return;
 		}
 
+		/* ensure that the player has a name */
+		if (this.ws[id].name.length == 0) {
+			libLog.Log(`Discarding grid update of unnamed player [${this.filePath}]`);
+			this.notifySingle(id);
+			return;
+		}
+
 		/* validate the grid structure */
 		let dirty = false, valid = (this.data.grid.length == grid.length);
 		let merged: GridCell[] = [];
