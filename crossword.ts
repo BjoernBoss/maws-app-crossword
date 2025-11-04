@@ -226,7 +226,7 @@ class ActiveGame {
 
 		/* check if the grid data are valid and otherwise notify the user */
 		if (!valid) {
-			client.log(`Discarding invalid grid update [${this.filePath}]`);
+			client.error(`Discarding invalid grid update [${this.filePath}]`);
 			this.notifySingle(ws);
 			return;
 		}
@@ -395,7 +395,7 @@ export class Crossword implements libCommon.ModuleInterface {
 				libFs.writeFileSync(filePath, JSON.stringify(parsed), { encoding: 'utf-8', flag: 'wx' });
 			}
 			catch (e: any) {
-				client.error(`Error while writing the game out: ${e.message}`);
+				libLog.Error(`Error while writing the game out: ${e.message}`);
 				client.respondInternalError('File-System error storing the game');
 				return;
 			}
@@ -493,7 +493,7 @@ export class Crossword implements libCommon.ModuleInterface {
 				else if (parsed.cmd == 'update')
 					that.gameStates[name].updateGrid(client, ws, parsed.data);
 			} catch (e: any) {
-				client.log(`Failed to parse web-socket response: ${e.message}`);
+				client.error(`Failed to parse web-socket response: ${e.message}`);
 				ws.close();
 			}
 		});
