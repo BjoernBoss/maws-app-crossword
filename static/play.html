@@ -1,0 +1,345 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<!-- Copyright (c) 2025 Bjoern Boss Henrichsen -->
+<!DOCTYPE html>
+<html lang="en" style="margin: 0; height: 100%;">
+
+<head>
+	<meta charset="utf-8">
+	<!-- prevent user-zooming as this breaks the viewport handling for keyboard-detection -->
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1.0, user-scalable=no">
+	<title>Play Crossword</title>
+	<link rel="stylesheet" type="text/css" href="/crossword/style.css">
+	<script src="/crossword/notifier.js"></script>
+	<script src="/crossword/sync-socket.js"></script>
+	<script src="/crossword/grid.js"></script>
+
+</head>
+
+<body contenteditable="false">
+	<!-- name screen -->
+	<div id="fetch-name" class="overlay show">
+		<div class="dialog">
+			<div class="caption">Your Player Name</div>
+			<div style="margin: 15px;">
+				<input placeholder="Name" id="name" style="width: 350px; font-size: 1.3em; padding: 4px;">
+			</div>
+			<div id="error" class="error" style="margin: 0px 15px 15px 15px;">Error Message</div>
+			<div class="confirm">
+				<div class="button" style="width: 100px;" onclick="_state.enter()">Ok</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- notification placeholder -->
+	<div id="notification-host" class="notification-host"></div>
+
+	<!-- game view -->
+	<div class="main">
+		<!-- game caption -->
+		<div class="header" style="justify-content: center;">
+			<div id="caption" class="caption">Playing!</div>
+		</div>
+
+		<!-- game players -->
+		<div class="players" id="players"></div>
+
+		<!-- game view -->
+		<div class="content" id="container">
+			<div class="grid" id="content" style="display: none;"></div>
+		</div>
+
+		<!-- game footer -->
+		<div class="footer">
+			<div class="button" style="height: 50px; width: 150px; margin-right: 15px;" id="guess">Guess</div>
+			<div style="display: flex; flex-direction: row;">
+				<div class="button left" style="height: 50px; width: 150px;" id="horizontal">
+					Horizontal &#x27a1;&#xFE0F;
+				</div>
+				<div class="button-separator"></div>
+				<div class="button right" style="height: 50px; width: 150px;" id="vertical">
+					Vertical &#x2b07;&#xFE0F;
+				</div>
+			</div>
+		</div>
+	</div>
+</body>
+
+</html>
+
+<script>
+	let _state = {
+		game: '',
+		name: '',
+		sock: null,
+		dirty: false,
+		grid: null,
+		players: {},
+		usedsHues: [],
+		view: null,
+		focus: null
+	};
+
+	window.onload = function () {
+		/* ensure phones handle the visibility of the keyboard properly */
+		if (window.visualViewport) {
+			let lastHeight = window.visualViewport.height;
+			window.visualViewport.addEventListener("resize", function () {
+
+				/* check if the keyboard was hidden and take the focus */
+				if (lastHeight * (4 / 3) < window.visualViewport.height && _state.focus != null)
+					_state.focus.lose();
+				lastHeight = window.visualViewport.height;
+
+				/* resize all components accordingly */
+				document.body.style.height = `${window.visualViewport.height}px`;
+				document.querySelectorAll('.overlay').forEach(e => e.style.height = `${window.visualViewport.height}px`);
+			});
+		}
+
+		/* initialize the last name from the cookies */
+		let lastName = document.cookie.split('; ').find((v) => v.startsWith('crossword-last-name='))?.split('=')[1];
+		if (lastName != null)
+			document.getElementById('name').value = lastName;
+
+		/* initialize the caption */
+		let game = new URLSearchParams(document.location.search).get('game');
+		if (game != null) {
+			_state.game = game;
+			document.getElementById('caption').innerText = `Crossword: ${_state.game}`;
+		}
+		else
+			document.getElementById('caption').innerText = 'Unknown Crossword!';
+
+		/* setup the socket and register all corresponding callbacks */
+		_state.sock = new SyncSocket(`/crossword/ws/${_state.game}`);
+		_state.sock.onfailed = (msg) => PushNotification(msg, true, () => _state.sock.retry());
+		_state.sock.onreceived = (data) => _state.handleData(data);
+		_state.sock.onconnected = () => _state.handleConnected();
+
+		/* setup the viewport */
+		const content = document.getElementById('content');
+		_state.view = new GridView(document.getElementById('container'), content);
+
+		/* setup the focus-host */
+		_state.focus = new GridFocus(_state.view, function () {
+			RenderGrid(_state.grid, _state.getAuthorHue);
+			_state.dirty = true;
+			_state.pushDirty();
+		}, function (horizontal) {
+			document.getElementById(horizontal ? 'horizontal' : 'vertical').classList.add('toggled');
+			document.getElementById(horizontal ? 'vertical' : 'horizontal').classList.remove('toggled');
+		}, function (certain) {
+			if (certain)
+				document.getElementById('guess').classList.remove('toggled');
+			else
+				document.getElementById('guess').classList.add('toggled');
+		});
+
+		/* add the toggle callbacks for horizontal/vertical and guess */
+		document.getElementById('horizontal').onmousedown = function (e) {
+			e.preventDefault();
+			_state.focus.config(true, null, null);
+		};
+		document.getElementById('vertical').onmousedown = function (e) {
+			e.preventDefault();
+			_state.focus.config(false, null, null);
+		};
+		document.getElementById('guess').onmousedown = function (e) {
+			e.preventDefault();
+			_state.focus.config(null, !_state.focus.isCertain(), null);
+		};
+
+		/* initialize the ui-state based on the focus-object */
+		document.getElementById(_state.focus.isHorizontal() ? 'horizontal' : 'vertical').classList.add('toggled');
+		if (!_state.focus.isCertain())
+			document.getElementById('guess').classList.add('toggled');
+	}
+
+	_state.enter = function () {
+		/* validate the name */
+		const name = document.getElementById('name').value;
+		if (name.length == 0) {
+			document.getElementById('error').innerText = 'Name cannot be empty';
+			document.getElementById('error').classList.add('show');
+			return;
+		}
+
+		/* update the name */
+		_state.name = name;
+		document.getElementById('fetch-name').classList.remove('show');
+
+		/* write the last name as a cookie out (lifetime = 24hrs) */
+		document.cookie = `crossword-last-name=${_state.name}; expires=${new Date(Date.now() + 24 * 60 * 60 * 1000).toUTCString()};`;
+
+		/* notify the socket about the available name */
+		if (_state.sock.connected())
+			_state.sock.send((send) => send({ cmd: 'name', name: _state.name }));
+
+		/* update the focus to use the proper name */
+		_state.focus.config(null, null, _state.name);
+
+		/* register convenience handler (first after setting the name to prevent the input from being consumed) */
+		document.body.onkeydown = function (e) {
+			if (e.key != ' ' && e.key != 'Tab' && e.key != 'Shift')
+				return;
+			e.stopPropagation();
+			e.preventDefault();
+			if (e.key == 'Shift')
+				_state.focus.config(null, false, null);
+			else
+				_state.focus.config(!_state.focus.isHorizontal(), null, null);
+		};
+		document.body.onkeyup = function (e) {
+			if (e.key == 'Shift') {
+				e.stopPropagation();
+				e.preventDefault();
+				_state.focus.config(null, true, null);
+			}
+		};
+	}
+
+	_state.nextColor = function () {
+		let hue = 0;
+
+		/* check if this is the first or second color */
+		if (_state.usedsHues.length == 0)
+			hue = Math.random() * 360;
+		else if (_state.usedsHues.length == 1)
+			hue = _state.usedsHues[0] + 180;
+
+		/* find the largest distance between two hues and use its center as next color */
+		else {
+			let start = _state.usedsHues[0], end = _state.usedsHues[1];
+
+			/* find the largest distance in the used hues */
+			for (let i = 1; i < _state.usedsHues.length; ++i) {
+				let tStart = _state.usedsHues[i], tEnd = (i + 1 >= _state.usedsHues.length ? _state.usedsHues[0] + 360 : _state.usedsHues[i + 1]);
+				if (tEnd - tStart > end - start) {
+					start = tStart;
+					end = tEnd;
+				}
+			}
+			hue = (start + end) / 2;
+		}
+
+		/* sanitize the color */
+		hue = Math.floor(hue);
+		if (hue >= 360)
+			hue -= 360;
+
+		/* add the hue to the list of used hues and return the actual hsl-color */
+		_state.usedsHues.push(hue);
+		_state.usedsHues.sort((a, b) => a - b);
+		return hue;
+	}
+	_state.updatePlayers = function () {
+		let players = Object.keys(_state.players).sort();
+		const html = document.getElementById('players');
+
+		/* update all of the players */
+		for (let i = 0; i < players.length; ++i) {
+			const name = players[i];
+			let div = null;
+
+			/* fetch the next child div */
+			if (i >= html.children.length) {
+				div = document.createElement('div');
+				div.classList.add('player');
+				html.appendChild(div);
+			}
+			else
+				div = html.children[i];
+
+			/* update the name, color, and online status */
+			if (_state.players[name].online)
+				div.classList.add('online');
+			else
+				div.classList.remove('online');
+			div.innerText = name;
+			div.style.backgroundColor = `hsl(${_state.players[name].hue}, 75%, 75%)`;
+		}
+
+		/* remove the remaining children */
+		while (html.children.length > players.length)
+			html.lastChild.remove();
+	}
+	_state.getAuthorHue = function (name) {
+		if (name in _state.players)
+			return _state.players[name].hue;
+		return 0;
+	}
+	_state.updateGrid = function (data) {
+		const content = document.getElementById('content');
+
+		/* check if the grid should be unloaded */
+		if (_state.grid != null && (_state.grid.width != data.width || _state.grid.height != data.height)) {
+			_state.grid = null;
+			while (content.children.length > 0)
+				content.lastChild.remove();
+		}
+
+		/* check if the initial grid is being shown */
+		if (_state.grid == null)
+			_state.grid = LoadGrid(data, content, _state.focus, _state.getAuthorHue);
+
+		/* update the grid data */
+		else
+			ApplyGridUpdate(_state.grid, data, _state.getAuthorHue);
+
+		/* update the view and focus */
+		_state.view.update(_state.grid);
+		_state.focus.update(_state.grid);
+	}
+
+	_state.handleData = function (data) {
+		/* check if invalid data have been received */
+		if (data === 'unknown-game') {
+			_state.sock.error(`Game [${_state.game}] not known by the server!`);
+			return;
+		}
+
+		/* check if the server has failed */
+		if (data.failed)
+			PushNotification('Server failed to write the game back!', true, null);
+
+		/* mark all players as offline until the online re-enables them */
+		for (const key in _state.players)
+			_state.players[key].online = false;
+
+		/* update the player data */
+		for (const key of data.names) {
+			if (!(key in _state.players))
+				_state.players[key] = { hue: _state.nextColor(), online: false };
+		}
+		for (const key of data.online) {
+			if (key in _state.players)
+				_state.players[key].online = true;
+			else
+				console.log(`Inconsistency detected between names and online names: ${key}`);
+		}
+		_state.updatePlayers();
+
+		/* update the grid */
+		_state.updateGrid(data);
+	}
+	_state.handleConnected = function () {
+		if (_state.name != '')
+			_state.sock.send((send) => send({ cmd: 'name', name: _state.name }));
+		_state.pushDirty();
+	}
+	_state.pushDirty = function () {
+		if (!_state.dirty)
+			return;
+		_state.dirty = false;
+
+		/* check if the grid can be sent */
+		if (_state.grid == null)
+			return;
+
+		/* build the game-state to be sent */
+		let out = FullSerializeGrid(_state.grid);
+
+		/* send the data to the server */
+		_state.sock.send((send) => send({ cmd: 'update', data: out }));
+	}
+</script>

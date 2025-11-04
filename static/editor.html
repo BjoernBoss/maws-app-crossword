@@ -1,0 +1,254 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<!-- Copyright (c) 2025 Bjoern Boss Henrichsen -->
+<!DOCTYPE html>
+<html lang="en" style="margin: 0; height: 100%;">
+
+<head>
+	<meta charset="utf-8">
+	<!-- prevent user-zooming as this breaks the viewport handling for keyboard-detection -->
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+	<title>Editor</title>
+	<link rel="stylesheet" type="text/css" href="/crossword/style.css">
+	<script src="/crossword/grid.js"></script>
+</head>
+
+<body contenteditable="false">
+	<!-- dimension screen -->
+	<div id="dimensions" class="overlay show">
+		<div class="dialog">
+			<div class="caption">Dimensions</div>
+			<div style="display: flex; flex-direction: row; margin: 15px;">
+				<input type="number" placeholder="Width" id="width"
+					style="width: 150px; font-size: 1.3em; padding: 4px;" min="1" max="64" value="15">
+				<div style="font-size: 1.75em; padding: 0px 10px 5px 10px;">&times;</div>
+				<input type="number" placeholder="Height" id="height"
+					style="width: 150px; font-size: 1.3em; padding: 4px;" min="1" max="64" value="15">
+			</div>
+			<div class="confirm">
+				<div class="button" style="width: 150px;" onclick="_state.setup()">Create</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- editor view -->
+	<div class="main">
+		<!-- editor caption -->
+		<div class="header">
+			<div id="caption" class="caption">Creating a new Crossword!</div>
+			<div style="min-width: 20px;"></div>
+			<div class="button" onclick="_state.finish();" style="width: 70px; min-width: 70px;">Finish</div>
+		</div>
+
+		<!-- editor view -->
+		<div class="content" id="container">
+			<div class="grid" id="content" style="display: none;"></div>
+		</div>
+
+		<!-- editor footer -->
+		<div class="footer">
+			Note: Numbers are automatically assigned. Should they not match, please open issue on github.
+		</div>
+	</div>
+
+	<!-- finalize screen -->
+	<div id="finalize" class="overlay">
+		<div class="dialog">
+			<div class="caption">Upload Crossword</div>
+			<div style="margin: 15px;">
+				<input placeholder="Name" id="name" style="width: 350px; font-size: 1.3em; padding: 4px;">
+			</div>
+			<div id="error" class="error" style="margin: 0px 15px 15px 15px;">Error Message</div>
+			<div style="margin: 0px 15px 15px 15px; font-size: 0.75em;">Note: Uploaded crosswords cannot be modified
+				anymore.</div>
+			<div class="confirm">
+				<div class="button" style="width: 100px;" onclick="_state.upload()">Upload</div>
+				<div style="width: 15px;"></div>
+				<div class="button" style="width: 100px;" onclick="_state.cancel()">Cancel</div>
+			</div>
+		</div>
+	</div>
+</body>
+
+</html>
+
+<script>
+	let _state = { dirty: false, uploading: false, uploaded: false };
+
+	window.onbeforeunload = function () { if (!_state.dirty || _state.uploaded) return null; return "Your work will be lost."; };
+
+	window.onload = function () {
+		/* ensure phones handle the visibility of the keyboard properly */
+		if (window.visualViewport) {
+			window.visualViewport.addEventListener("resize", function () {
+				document.body.style.height = `${window.visualViewport.height}px`;
+				document.querySelectorAll('.overlay').forEach(e => e.style.height = `${window.visualViewport.height}px`);
+			});
+		}
+	}
+
+	_state.setup = function () {
+		/* validate the dimension */
+		const width = parseInt(document.getElementById('width').value);
+		const height = parseInt(document.getElementById('height').value);
+		if (!isFinite(width) || !isFinite(height) || width < 0 || width > 64 || height < 0 || height > 64) {
+			alert("Invalid dimensions specified");
+			return;
+		}
+
+		/* lock the input page */
+		document.getElementById('dimensions').classList.remove('show');
+
+		/* setup the editor caption */
+		document.getElementById('caption').innerText = `Creating a Crossword of Size: [${width} \u00d7 ${height}]`;
+
+		/* create the grid object and show it */
+		const content = document.getElementById('content');
+		_state.grid = GenerateGrid(width, height, content, null, () => 0);
+
+		/* setup the viewport */
+		_state.view = new GridView(document.getElementById('container'), content);
+		_state.view.update(_state.grid);
+
+		/* register the event listeners for updating the grid (by left-click/single touch) */
+		_state.updating = null;
+		content.addEventListener('mousedown', function (e) {
+			if (e.button == 0 && _state.startToggle(e.clientX, e.clientY)) {
+				e.preventDefault();
+				e.stopPropagation();
+			}
+		});
+		content.addEventListener('mousemove', function (e) {
+			if ((e.buttons & 0x01) != 0x01)
+				_state.stopToggle();
+			else
+				_state.moveToggle(e.clientX, e.clientY);
+		});
+		content.addEventListener('mouseup', function (e) {
+			if (e.button != 0) return;
+			_state.stopToggle();
+			e.preventDefault();
+			e.stopPropagation();
+		});
+		content.addEventListener('touchstart', function (e) {
+			if (e.touches.length != 1) _state.stopToggle();
+			else if (_state.startToggle(e.touches[0].clientX, e.touches[0].clientY)) {
+				e.preventDefault();
+				e.stopPropagation();
+			}
+		});
+		content.addEventListener('touchmove', function (e) {
+			if (e.touches.length != 1)
+				_state.stopToggle();
+			else
+				_state.moveToggle(e.touches[0].clientX, e.touches[0].clientY);
+		});
+		content.addEventListener('touchstop', function (e) {
+			_state.stopToggle();
+			e.preventDefault();
+			e.stopPropagation();
+		});
+
+		/* register handle to cancel dialogs */
+		window.addEventListener('keydown', function (e) {
+			if (e.key === 'Escape')
+				_state.cancel();
+		});
+	}
+	_state.finish = function () {
+		document.getElementById("finalize").classList.add('show');
+		document.getElementById('error').classList.remove('show');
+	}
+	_state.upload = function () {
+		let name = document.getElementById('name').value;
+
+		/* check if an upload is active */
+		if (_state.uploading) {
+			document.getElementById('error').innerText = 'Uploading...';
+			document.getElementById('error').classList.add('show');
+			return;
+		}
+
+		/* validate the name length */
+		if (name.length == 0 || name.length > 255) {
+			document.getElementById('error').innerText = 'Name must be between 1 and 255 characters long';
+			document.getElementById('error').classList.add('show');
+			return;
+		}
+
+		/* validate the name style */
+		for (let i = 0; i < name.length; ++i) {
+			if (name[i] >= 'a' && name[i] <= 'z') continue;
+			if (name[i] >= 'A' && name[i] <= 'Z') continue;
+			if (name[i] >= '0' && name[i] <= '9') continue;
+			if (name[i] == '-' || name[i] == '_' || name[i] == '.') {
+				if (i != 0 && i != name.length - 1)
+					continue;
+				document.getElementById('error').innerText = 'Name connot start or end with [._-]';
+			}
+			else
+				document.getElementById('error').innerText = 'Name can only consist of [a-z][A-Z][0-9][._-]';
+			document.getElementById('error').classList.add('show');
+			return;
+		}
+
+		/* serialize the grid */
+		let out = SolidSerializeAll(_state.grid);
+		document.getElementById("finalize").classList.remove('show');
+
+		/* post the result out */
+		_state.uploading = true;
+		fetch(`/crossword/game/${name}`, { method: 'POST', body: JSON.stringify(out), headers: { "Content-Type": 'application/json' } })
+			.then(function (resp) {
+				/* redirect to the main page */
+				if (!resp.ok)
+					throw new Error(resp.statusText);
+				_state.uploaded = true;
+				document.location = `/crossword/main.html?uploaded=${name}`;
+			}).catch(function (e) {
+				/* post the error */
+				document.getElementById("finalize").classList.add('show');
+				document.getElementById('error').innerText = `Error while uploading the edited crossword: ${e.message}`;
+				document.getElementById('error').classList.add('show');
+				_state.uploading = false;
+			});
+	}
+	_state.cancel = function () {
+		document.getElementById('name').value = '';
+		document.getElementById("finalize").classList.remove('show');
+	}
+
+	_state.startToggle = function (clientX, clientY) {
+		/* check if a valid cell has been hit */
+		let [x, y] = _state.view.index(clientX, clientY);
+		if (x == null || y == null) return false;
+
+		/* setup the operation */
+		_state.updating = !_state.grid.mesh[x][y].solid;
+		_state.dirty = true;
+		_state.toggleSolid(x, y);
+		return true;
+	}
+	_state.moveToggle = function (clientX, clientY) {
+		if (_state.updating == null) return;
+		let [x, y] = _state.view.index(clientX, clientY);
+		_state.toggleSolid(x, y);
+	}
+	_state.stopToggle = function () {
+		_state.updating = null;
+	}
+	_state.toggleSolid = function (x, y) {
+		/* check if the operation is over */
+		if (_state.updating == null) return;
+		if (x == null || y == null) {
+			_state.updating = null;
+			return;
+		}
+
+		/* check if the value should be updated */
+		if (_state.grid.mesh[x][y].solid != _state.updating) {
+			_state.grid.mesh[x][y].solid = _state.updating;
+			RenderGrid(_state.grid, () => 0);
+		}
+	}
+
+</script>
