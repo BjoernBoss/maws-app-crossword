@@ -15,5 +15,5 @@ Afterwards, transpile the entire server application, and set it up in the `setup
 
 ```JavaScript
 const app = await import("./crossword/app.js");
-server.registerPath('/crossword', new app.Application('path/to/crossword/data'));
+server.register('/crossword', new app.Application('path/to/crossword/data'), null);
 ```
