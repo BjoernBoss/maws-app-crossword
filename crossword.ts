@@ -5,7 +5,6 @@ import * as libClient from "core/client.js";
 import * as libLog from "core/log.js";
 import * as libLocation from "core/location.js";
 import * as libFs from "fs";
-import * as libWs from "ws";
 
 const nameRegex = '[a-zA-Z0-9]([-_.]?[a-zA-Z0-9])*';
 const nameMaxLength = 255;
@@ -32,14 +31,14 @@ interface GameState extends GameBoard {
 };
 
 class ActiveGame {
-	private ws: Map<libWs.WebSocket, string>;
+	private ws: Map<libClient.ClientSocket, string>;
 	private data: GameBoard | null;
 	private filePath: string;
 	private writebackFailed: boolean;
 	private queued: NodeJS.Timeout | null;
 
 	constructor(filePath: string) {
-		this.ws = new Map<libWs.WebSocket, string>();
+		this.ws = new Map<libClient.ClientSocket, string>();
 		this.data = null;
 		this.filePath = filePath;
 		this.writebackFailed = false;
@@ -100,7 +99,7 @@ class ActiveGame {
 		for (const child of this.ws)
 			child[0].send(json);
 	}
-	private notifySingleId(ws: libWs.WebSocket): void {
+	private notifySingleId(ws: libClient.ClientSocket): void {
 		const json = JSON.stringify(this.buildOutput());
 		ws.send(json);
 	}
@@ -159,18 +158,18 @@ class ActiveGame {
 		this.writebackFailed = true;
 	}
 
-	public updateGrid(client: libClient.HttpUpgrade, ws: libWs.WebSocket, grid: any): void {
+	public updateGrid(client: libClient.ClientSocket, grid: any): void {
 		/* ensure that a grid exists */
 		if (this.data == null) {
 			client.log(`Discarding grid update for failed load [${this.filePath}]`);
-			this.notifySingle(ws);
+			this.notifySingle(client);
 			return;
 		}
 
 		/* ensure that the player has a name */
-		if (this.ws.get(ws)!.length == 0) {
+		if (this.ws.get(client)!.length == 0) {
 			client.log(`Discarding grid update of unnamed player [${this.filePath}]`);
-			this.notifySingle(ws);
+			this.notifySingle(client);
 			return;
 		}
 
@@ -227,14 +226,14 @@ class ActiveGame {
 		/* check if the grid data are valid and otherwise notify the user */
 		if (!valid) {
 			client.error(`Discarding invalid grid update [${this.filePath}]`);
-			this.notifySingle(ws);
+			this.notifySingle(client);
 			return;
 		}
 
 		/* check if the data are not dirty */
 		if (!dirty) {
 			client.log(`Discarding empty grid update of [${this.filePath}]`);
-			this.notifySingle(ws);
+			this.notifySingle(client);
 			return;
 		}
 
@@ -243,7 +242,7 @@ class ActiveGame {
 		this.notifyAll();
 		this.queueWriteBack();
 	}
-	public updateName(ws: libWs.WebSocket, name: string): void {
+	public updateName(ws: libClient.ClientSocket, name: string): void {
 		name = name.slice(0, nameMaxLength + 1);
 		if (this.ws.get(ws) == name) return;
 
@@ -251,7 +250,7 @@ class ActiveGame {
 		this.ws.set(ws, name);
 		this.notifyAll();
 	}
-	public drop(ws: libWs.WebSocket): boolean {
+	public drop(ws: libClient.ClientSocket): boolean {
 		/* remove the web-socket from the open connections */
 		let name = this.ws.get(ws)!;
 		this.ws.delete(ws);
@@ -267,10 +266,10 @@ class ActiveGame {
 			this.notifyAll();
 		return true;
 	}
-	public register(ws: libWs.WebSocket): void {
+	public register(ws: libClient.ClientSocket): void {
 		this.ws.set(ws, '');
 	}
-	public notifySingle(ws: libWs.WebSocket): void {
+	public notifySingle(ws: libClient.ClientSocket): void {
 		this.notifySingleId(ws);
 	}
 };
@@ -428,21 +427,21 @@ export class Crossword implements libCommon.ModuleInterface {
 		/* return them to the request */
 		client.respondJson(JSON.stringify(out));
 	}
-	private acceptWebSocket(client: libClient.HttpUpgrade, ws: libWs.WebSocket, name: string): void {
+	private acceptWebSocket(client: libClient.ClientSocket, name: string): void {
 		client.log(`Handling WebSocket to: [${name}]`);
 		const filePath = this.fileGames(`${name}.json`);
 
 		/* check if the game exists */
 		if (!libFs.existsSync(filePath)) {
-			ws.send(JSON.stringify('unknown-game'));
-			ws.close();
+			client.send(JSON.stringify('unknown-game'));
+			client.close();
 			return;
 		}
 
 		/* check if the game-state for the given name has already been set-up */
 		if (!(name in this.gameStates))
 			this.gameStates[name] = new ActiveGame(filePath);
-		this.gameStates[name].register(ws);
+		this.gameStates[name].register(client);
 		client.log(`Registered websocket to [${name}]`);
 
 		/* define the alive callback */
@@ -456,12 +455,12 @@ export class Crossword implements libCommon.ModuleInterface {
 			/* queue the check callback */
 			aliveInterval = setTimeout(function () {
 				if (!isAlive) {
-					ws.close();
+					client.close();
 					aliveInterval = null;
 				}
 				else {
 					queueAliveCheck(false);
-					ws.ping();
+					client.ping();
 				}
 			}, pingTimeout);
 		};
@@ -471,15 +470,15 @@ export class Crossword implements libCommon.ModuleInterface {
 
 		/* register the web-socket callbacks */
 		let that = this;
-		ws.on('pong', () => queueAliveCheck(true));
-		ws.on('close', function () {
-			if (!that.gameStates[name].drop(ws))
+		client.onpong = () => queueAliveCheck(true);
+		client.onclose = function () {
+			if (!that.gameStates[name].drop(client))
 				delete that.gameStates[name];
 			if (aliveInterval != null)
 				clearTimeout(aliveInterval);
 			client.log(`Socket disconnected`);
-		});
-		ws.on('message', function (data) {
+		};
+		client.ondata = function (data) {
 			queueAliveCheck(true);
 
 			/* parse the data */
@@ -489,17 +488,17 @@ export class Crossword implements libCommon.ModuleInterface {
 
 				/* handle the command */
 				if (parsed.cmd == 'name' && typeof parsed.name == 'string')
-					that.gameStates[name].updateName(ws, parsed.name);
+					that.gameStates[name].updateName(client, parsed.name);
 				else if (parsed.cmd == 'update')
-					that.gameStates[name].updateGrid(client, ws, parsed.data);
+					that.gameStates[name].updateGrid(client, parsed.data);
 			} catch (e: any) {
 				client.error(`Failed to parse web-socket response: ${e.message}`);
-				ws.close();
+				client.close();
 			}
-		});
+		};
 
 		/* send the initial state to the socket */
-		this.gameStates[name].notifySingle(ws);
+		this.gameStates[name].notifySingle(client);
 	}
 
 	public request(client: libClient.HttpRequest): void {
@@ -550,7 +549,7 @@ export class Crossword implements libCommon.ModuleInterface {
 		/* extract the name and validate it */
 		let name = client.path.slice(4);
 		if (name.match(nameRegex) && name.length <= nameMaxLength) {
-			if (client.tryAcceptWebSocket((ws) => this.acceptWebSocket(client, ws, name)))
+			if (client.tryAcceptWebSocket((ws) => this.acceptWebSocket(ws, name)))
 				return;
 		}
 		client.log(`Invalid request for web-socket point for game [${name}]`);
