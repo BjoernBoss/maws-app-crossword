@@ -18,7 +18,7 @@
 <body contenteditable="false">
 	<!-- name screen -->
 	<div id="fetch-name" class="overlay show">
-		<div class="dialog">
+		<div class="dialog" id="name-dialog">
 			<div class="caption">Your Player Name</div>
 			<div style="margin: 15px;">
 				<input placeholder="Name" id="name" style="width: 350px; font-size: 1.3em; padding: 4px;">
@@ -156,16 +156,19 @@
 			document.getElementById('guess').classList.add('toggled');
 
 		/* add a callback to be able to hide the name-input (thereby only viewing the game) */
+		document.getElementById('name-dialog').onclick = function(e) {
+			e.preventDefault();
+			e.stopPropagation();
+		};
 		document.getElementById('fetch-name').onclick = function (e) {
 			e.preventDefault();
 			_state.enter(true);
-		}
+		};
 	}
 
 	_state.enter = function (passive) {
 		if (_state.configured)
 			return;
-		_state.configured = true;
 
 		/* validate the name */
 		if (!passive) {
@@ -188,6 +191,7 @@
 			/* update the focus to use the proper name */
 			_state.focus.config(null, null, _state.name);
 		}
+		_state.configured = true;
 		document.getElementById('fetch-name').classList.remove('show');
 
 		/* register convenience handler (first after setting the name to prevent the input from being consumed) */
