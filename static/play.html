@@ -156,7 +156,7 @@
 			document.getElementById('guess').classList.add('toggled');
 
 		/* add a callback to be able to hide the name-input (thereby only viewing the game) */
-		document.getElementById('name-dialog').onclick = function(e) {
+		document.getElementById('name-dialog').onclick = function (e) {
 			e.preventDefault();
 			e.stopPropagation();
 		};
@@ -248,11 +248,16 @@
 		_state.usedsHues.sort((a, b) => a - b);
 		return hue;
 	}
+	_state.getAuthorHue = function (name) {
+		if (name in _state.players)
+			return _state.players[name].hue;
+		return 0;
+	}
 	_state.updatePlayers = function () {
-		let players = Object.keys(_state.players).sort();
 		const html = document.getElementById('players');
 
 		/* update all of the players */
+		let players = Object.keys(_state.players).sort();
 		for (let i = 0; i < players.length; ++i) {
 			const name = players[i];
 			let div = null;
@@ -278,11 +283,6 @@
 		/* remove the remaining children */
 		while (html.children.length > players.length)
 			html.lastChild.remove();
-	}
-	_state.getAuthorHue = function (name) {
-		if (name in _state.players)
-			return _state.players[name].hue;
-		return 0;
 	}
 	_state.updateGrid = function (data) {
 		const content = document.getElementById('content');
